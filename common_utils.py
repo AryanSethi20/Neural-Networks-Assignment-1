@@ -1,5 +1,3 @@
-### THIS FILE CONTAINS COMMON FUNCTIONS, CLASSSES
-
 import tqdm
 import time
 import random 
@@ -21,11 +19,9 @@ from sklearn.model_selection import KFold
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix
 
-
-
 def split_dataset(df, columns_to_drop, test_size, random_state):
+    
     label_encoder = preprocessing.LabelEncoder()
-
     df['label'] = label_encoder.fit_transform(df['label'])
 
     df_train, df_test = train_test_split(df, test_size=test_size, random_state=random_state)
@@ -130,4 +126,25 @@ class EarlyStopper:
             if self.counter >= self.patience:
                 return True
         return False
-
+    
+class MLP_Custom(nn.Module):
+    def __init__(self, input_size, first_hidden_size, other_hidden_size=128, output_size=1, dropout_prob=0.2):
+        super(MLP_Custom, self).__init__()
+        self.fc1 = torch.nn.Linear(input_size, first_hidden_size)
+        self.fc2 = torch.nn.Linear(first_hidden_size, other_hidden_size)
+        self.fc3 = torch.nn.Linear(other_hidden_size, other_hidden_size)
+        self.fc4 = torch.nn.Linear(other_hidden_size, output_size)
+        
+        self.dropout = torch.nn.Dropout(dropout_prob)
+        self.relu = torch.nn.ReLU()
+        self.sigmoid = torch.nn.Sigmoid()
+        
+    def forward(self, x):
+        x = self.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.relu(self.fc2(x))
+        x = self.dropout(x)
+        x = self.relu(self.fc3(x))
+        x = self.dropout(x)
+        x = self.sigmoid(self.fc4(x))
+        return x
