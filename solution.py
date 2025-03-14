@@ -599,3 +599,434 @@ print("toward the final prediction. Features pushing to the right (red) increase
 print("toward 'metal', while features pushing to the left (blue) decreased it toward 'blues'.")
 print("\nThis type of analysis helps us understand which audio characteristics are most distinctive")
 print("between blues and metal genres, providing valuable insights for audio classification tasks.")
+
+# CS4001/4042 Assignment 1
+# Part B Solution
+# Python 3.10.9 compatible
+
+import os
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+
+# Import from common_utils
+import common_utils
+
+# Set seed using the provided utility
+common_utils.set_seed(42)
+
+# Question B1: Neural Network for Tabular Data with PyTorch Tabular
+print("Part B, Question 1: PyTorch Tabular Implementation")
+
+# Read the dataset
+df = pd.read_csv('hdb_price_prediction.csv')
+print(f"Dataset shape: {df.shape}")
+print(f"Year range: {df['year'].min()} to {df['year'].max()}")
+
+# Split data by year
+train_df = df[df['year'] <= 2020].copy()
+test_df_2021 = df[df['year'] == 2021].copy()
+test_df_2022 = df[df['year'] == 2022].copy() 
+test_df_2023 = df[df['year'] == 2023].copy()
+
+print(f"Train set (≤2020): {train_df.shape[0]} records")
+print(f"Test set (2021): {test_df_2021.shape[0]} records")
+print(f"Test set (2022): {test_df_2022.shape[0]} records")
+print(f"Test set (2023): {test_df_2023.shape[0]} records")
+
+# Define features as specified in the assignment
+categorical_features = ['month', 'town', 'flat_model_type', 'storey_range']
+continuous_features = ['dist_to_nearest_stn', 'dist_to_dhoby', 'degree_centrality', 
+                      'eigenvector_centrality', 'remaining_lease_years', 'floor_area_sqm']
+target = 'resale_price'
+
+# Import PyTorch Tabular libraries
+from pytorch_tabular import TabularModel
+from pytorch_tabular.models import CategoryEmbeddingModelConfig
+from pytorch_tabular.config import (
+    DataConfig,
+    OptimizerConfig,
+    TrainerConfig,
+)
+
+# Configure the model
+data_config = DataConfig(
+    target=[target],
+    continuous_cols=continuous_features,
+    categorical_cols=categorical_features,
+    continuous_feature_transform=None,  # Auto-scaling will be applied
+)
+
+trainer_config = TrainerConfig(
+    auto_lr_find=True,  # Automatically tune learning rate
+    batch_size=1024,
+    max_epochs=50,
+    gpus=0,  # CPU only
+    early_stopping="valid_loss",
+    early_stopping_patience=3,  # Using same patience as in common_utils.EarlyStopper default
+)
+
+optimizer_config = OptimizerConfig(
+    optimizer="Adam"  # No need to set learning rate (auto-tuned)
+)
+
+model_config = CategoryEmbeddingModelConfig(
+    task="regression",
+    layers=[50],  # 1 hidden layer with 50 neurons as required
+    activation="ReLU",
+    dropout=0.1,
+)
+
+# Initialize and train the model
+tabular_model = TabularModel(
+    data_config=data_config,
+    model_config=model_config,
+    optimizer_config=optimizer_config,
+    trainer_config=trainer_config,
+)
+
+print("Training the PyTorch Tabular model...")
+tabular_model.fit(train=train_df, validation=test_df_2021)
+
+# Evaluate the model on 2021 test data
+pred_df = tabular_model.predict(test_df_2021)
+test_preds = pred_df[target + "_prediction"].values
+test_actuals = test_df_2021[target].values
+
+# Calculate metrics
+rmse = np.sqrt(mean_squared_error(test_actuals, test_preds))
+r2 = r2_score(test_actuals, test_preds)
+
+print(f"\nB1 Results on 2021 Test Set:")
+print(f"RMSE: ${rmse:.2f}")
+print(f"R² Score: {r2:.4f}")
+
+# Calculate errors for each test sample
+test_df_2021['predicted'] = test_preds
+test_df_2021['error'] = np.abs(test_df_2021['predicted'] - test_df_2021[target])
+
+# Show top 25 samples with largest errors
+top_25_errors = test_df_2021.sort_values(by='error', ascending=False).head(25)
+print("\nTop 25 samples with largest prediction errors:")
+print(top_25_errors[['year', 'month', 'town', 'flat_model_type', 'floor_area_sqm', 'resale_price', 'predicted', 'error']])
+
+# Question B2: Neural Network with PyTorch-WideDeep
+print("\nPart B, Question 2: PyTorch-WideDeep Implementation")
+
+from pytorch_widedeep.preprocessing import TabPreprocessor
+from pytorch_widedeep.models import TabMlp, WideDeep
+from pytorch_widedeep import Trainer
+from pytorch_widedeep.metrics import R2Score
+
+# For B2, test set includes 2021 and after
+test_df_b2 = df[df['year'] >= 2021].copy()
+print(f"Train set (≤2020): {train_df.shape[0]} records")
+print(f"Test set (≥2021): {test_df_b2.shape[0]} records")
+
+# Prepare data for TabPreprocessor
+X_train = train_df.copy()
+y_train = X_train.pop(target)
+X_test = test_df_b2.copy()
+y_test = X_test.pop(target)
+
+# Preprocess the tabular data
+tab_preprocessor = TabPreprocessor(
+    categorical_cols=categorical_features,
+    continuous_cols=continuous_features,
+    scale=True
+)
+
+X_tab_train = tab_preprocessor.fit_transform(X_train)
+X_tab_test = tab_preprocessor.transform(X_test)
+
+# Create the TabMlp model with 2 hidden layers (200, 100)
+tab_mlp = TabMlp(
+    column_idx=tab_preprocessor.column_idx,
+    mlp_hidden_dims=[200, 100],
+    mlp_activation="relu",
+    embed_input=tab_preprocessor.embeddings_input,
+    continuous_cols=continuous_features
+)
+
+# Combine the components
+model = WideDeep(deeptabular=tab_mlp)
+
+# Create a Trainer
+trainer = Trainer(
+    model,
+    objective="regression",
+    optimizers="Adam",
+    lr=0.001,
+    metrics=[R2Score],
+    callbacks=None,
+    verbose=1
+)
+
+# Train the model
+print("Training the PyTorch-WideDeep model...")
+trainer.fit(
+    X_tab=X_tab_train,
+    target=y_train,
+    n_epochs=60,
+    batch_size=64,
+    val_split=0.1,
+    num_workers=0
+)
+
+# Evaluate on test set
+preds = trainer.predict(X_tab=X_tab_test)
+rmse_b2 = np.sqrt(mean_squared_error(y_test, preds))
+r2_b2 = r2_score(y_test, preds)
+
+print(f"\nB2 Results on Test Set (≥2021):")
+print(f"RMSE: ${rmse_b2:.2f}")
+print(f"R² Score: {r2_b2:.4f}")
+
+# Question B3: Model Explainability with Captum
+print("\nPart B, Question 3: Model Explainability with Captum")
+
+# Use the same train/test split as B1 but only with numeric features
+X_train_numeric = train_df[continuous_features].copy()
+y_train_numeric = train_df[target].copy()
+X_test_numeric = test_df_2021[continuous_features].copy()
+y_test_numeric = test_df_2021[target].copy()
+
+# Standardize features - using function from common_utils would require slight modification, 
+# as it expects DataFrames, but we'll keep it consistent with the rest of the solution
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train_numeric)
+X_test_scaled = scaler.transform(X_test_numeric)
+
+# Convert to PyTorch tensors
+X_train_tensor = torch.tensor(X_train_scaled, dtype=torch.float32)
+y_train_tensor = torch.tensor(y_train_numeric.values, dtype=torch.float32).reshape(-1, 1)
+X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32)
+y_test_tensor = torch.tensor(y_test_numeric.values, dtype=torch.float32).reshape(-1, 1)
+
+# We could use the MLP_Custom from common_utils, but it has a different architecture
+# than what's required for Question B3 (3 hidden layers with 5 neurons each)
+# So we'll define a simple neural network specifically for this task
+class SimpleNN(nn.Module):
+    def __init__(self, input_size):
+        super(SimpleNN, self).__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(input_size, 5),
+            nn.ReLU(),
+            nn.Linear(5, 5),
+            nn.ReLU(),
+            nn.Linear(5, 5),
+            nn.ReLU(),
+            nn.Linear(5, 1)
+        )
+    
+    def forward(self, x):
+        return self.layers(x)
+
+# Create and train the model
+model_explain = SimpleNN(len(continuous_features))
+loss_fn = nn.MSELoss()
+optimizer = torch.optim.Adam(model_explain.parameters(), lr=0.001)
+
+# Train the model using EarlyStopper from common_utils
+n_epochs = 100
+batch_size = 64
+n_samples = X_train_tensor.shape[0]
+n_batches = n_samples // batch_size
+
+# Initialize early stopper
+early_stopper = common_utils.EarlyStopper(patience=3, min_delta=0)
+
+print("Training the SimpleNN model for explainability...")
+for epoch in range(n_epochs):
+    model_explain.train()
+    for i in range(0, n_samples, batch_size):
+        X_batch = X_train_tensor[i:i+batch_size]
+        y_batch = y_train_tensor[i:i+batch_size]
+        
+        optimizer.zero_grad()
+        y_pred = model_explain(X_batch)
+        loss = loss_fn(y_pred, y_batch)
+        loss.backward()
+        optimizer.step()
+    
+    # Calculate validation loss for early stopping
+    model_explain.eval()
+    with torch.no_grad():
+        y_pred = model_explain(X_test_tensor)
+        test_loss = loss_fn(y_pred, y_test_tensor).item()
+        
+        # Check for early stopping
+        if early_stopper.early_stop(test_loss):
+            print(f"Early stopping at epoch {epoch+1}")
+            break
+        
+        # Print progress every 10 epochs
+        if (epoch+1) % 10 == 0:
+            y_pred_train = model_explain(X_train_tensor)
+            train_loss = loss_fn(y_pred_train, y_train_tensor).item()
+            print(f"Epoch {epoch+1}: Train loss: {train_loss:.4f}, Test loss: {test_loss:.4f}")
+
+# Evaluate the model
+model_explain.eval()
+with torch.no_grad():
+    y_pred = model_explain(X_test_tensor)
+    test_mse = loss_fn(y_pred, y_test_tensor).item()
+    test_rmse = np.sqrt(test_mse)
+    test_r2 = r2_score(y_test_tensor.numpy(), y_pred.numpy())
+    
+print(f"\nSimpleNN Model Performance:")
+print(f"RMSE: ${test_rmse:.2f}")
+print(f"R² Score: {test_r2:.4f}")
+
+# Import Captum for model explainability
+from captum.attr import Saliency, InputXGradient, IntegratedGradients, DeepLift, GradientShap, FeatureAblation
+
+# Use only first 1000 test samples to reduce computation time
+n_explain_samples = min(1000, X_test_tensor.shape[0])
+X_subset = X_test_tensor[:n_explain_samples]
+
+# Initialize attribution methods
+saliency = Saliency(model_explain)
+input_x_gradient = InputXGradient(model_explain)
+integrated_gradients = IntegratedGradients(model_explain)
+deep_lift = DeepLift(model_explain)
+gradient_shap = GradientShap(model_explain)
+feature_ablation = FeatureAblation(model_explain)
+
+# Compute attributions
+attributions = {}
+print("\nComputing feature attributions with different methods...")
+
+# Input x Gradient
+attributions['Input x Gradient'] = input_x_gradient.attribute(X_subset).detach().numpy()
+
+# Integrated Gradients
+attributions['Integrated Gradients'] = integrated_gradients.attribute(X_subset).detach().numpy()
+
+# DeepLift
+attributions['DeepLift'] = deep_lift.attribute(X_subset).detach().numpy()
+
+# GradientSHAP
+baseline = torch.zeros((1, X_subset.shape[1]))
+attributions['GradientSHAP'] = gradient_shap.attribute(X_subset, baselines=baseline).detach().numpy()
+
+# Feature Ablation
+attributions['Feature Ablation'] = feature_ablation.attribute(X_subset).detach().numpy()
+
+# Compute mean attributions across samples for each feature
+mean_attributions = {
+    method: np.abs(attr).mean(axis=0) for method, attr in attributions.items()
+}
+
+# Plot feature attributions
+plt.figure(figsize=(15, 8))
+x = range(len(continuous_features))
+width = 0.15
+offset = 0
+
+for i, (method, attr) in enumerate(mean_attributions.items()):
+    plt.bar([p + offset for p in x], attr, width, label=method)
+    offset += width
+
+plt.xlabel('Features')
+plt.ylabel('Mean Attribution Score')
+plt.title('Feature Importance by Explainability Method')
+plt.xticks([i + 0.3 for i in x], continuous_features, rotation=45)
+plt.legend()
+plt.tight_layout()
+plt.savefig('feature_attributions.png')
+
+# Identify top three features based on average of all methods
+avg_attributions = np.mean([attr for attr in mean_attributions.values()], axis=0)
+top_features_idx = np.argsort(avg_attributions)[::-1][:3]
+top_features = [continuous_features[i] for i in top_features_idx]
+
+print(f"\nTop three most important features:")
+for i, feature in enumerate(top_features):
+    print(f"{i+1}. {feature}: {avg_attributions[top_features_idx[i]]:.4f}")
+
+# Question B4: Model Degradation Analysis
+print("\nPart B, Question 4: Model Degradation Analysis")
+
+# Evaluate the B1 model on 2022 and 2023 data
+pred_df_2022 = tabular_model.predict(test_df_2022)
+test_preds_2022 = pred_df_2022[target + "_prediction"].values
+test_actuals_2022 = test_df_2022[target].values
+rmse_2022 = np.sqrt(mean_squared_error(test_actuals_2022, test_preds_2022))
+r2_2022 = r2_score(test_actuals_2022, test_preds_2022)
+
+pred_df_2023 = tabular_model.predict(test_df_2023)
+test_preds_2023 = pred_df_2023[target + "_prediction"].values
+test_actuals_2023 = test_df_2023[target].values
+rmse_2023 = np.sqrt(mean_squared_error(test_actuals_2023, test_preds_2023))
+r2_2023 = r2_score(test_actuals_2023, test_preds_2023)
+
+print(f"Model Performance Across Years:")
+print(f"2021 - RMSE: ${rmse:.2f}, R²: {r2:.4f}")
+print(f"2022 - RMSE: ${rmse_2022:.2f}, R²: {r2_2022:.4f}")
+print(f"2023 - RMSE: ${rmse_2023:.2f}, R²: {r2_2023:.4f}")
+
+# Check for data drift using Alibi Detect
+from alibi_detect.cd import TabularDrift
+
+# Sample 1000 records from train and 2023 test datasets
+np.random.seed(SEED)
+train_sample = train_df.sample(1000, random_state=SEED)
+test_sample_2023 = test_df_2023.sample(min(1000, test_df_2023.shape[0]), random_state=SEED)
+
+# Convert categorical features to numerical using one-hot encoding
+X_train_drift = pd.get_dummies(train_sample[continuous_features + categorical_features])
+X_test_drift = pd.get_dummies(test_sample_2023[continuous_features + categorical_features])
+
+# Align columns (in case some values only appear in test or train)
+common_columns = X_train_drift.columns.intersection(X_test_drift.columns)
+X_train_drift = X_train_drift[common_columns]
+X_test_drift = X_test_drift[common_columns]
+
+print(f"\nChecking for data drift between train (≤2020) and 2023 data...")
+# Initialize drift detector
+drift_detector = TabularDrift(
+    X_train_drift.values,
+    p_val=0.05,
+    categories_per_feature=None,
+    preprocess_fn=None,
+    feature_names=list(X_train_drift.columns)
+)
+
+# Predict if drift occurred
+drift_preds = drift_detector.predict(X_test_drift.values)
+is_drift = drift_preds['data']['is_drift']
+p_vals = drift_preds['data']['p_val']
+feature_scores = dict(zip(X_train_drift.columns, p_vals))
+
+print(f"Overall drift detected: {is_drift}")
+print("\nFeatures with significant drift (p-value < 0.05):")
+drifted_features = {feat: p_val for feat, p_val in feature_scores.items() if p_val < 0.05}
+for feat, p_val in sorted(drifted_features.items(), key=lambda x: x[1]):
+    print(f"{feat}: p-value = {p_val:.4f}")
+
+# Addressing model degradation by fine-tuning
+print("\nAddressing model degradation by fine-tuning the model on recent data...")
+
+# Combine 2021 and 2022 data for fine-tuning
+fine_tune_df = pd.concat([test_df_2021, test_df_2022])
+
+# Fine-tune the model
+tabular_model.fit(train=fine_tune_df)
+
+# Evaluate fine-tuned model on 2023 data
+pred_df_2023_ft = tabular_model.predict(test_df_2023)
+test_preds_2023_ft = pred_df_2023_ft[target + "_prediction"].values
+rmse_2023_ft = np.sqrt(mean_squared_error(test_actuals_2023, test_preds_2023_ft))
+r2_2023_ft = r2_score(test_actuals_2023, test_preds_2023_ft)
+
+print(f"\nFine-tuned Model Performance on 2023 data:")
+print(f"Before fine-tuning - RMSE: ${rmse_2023:.2f}, R²: {r2_2023:.4f}")
+print(f"After fine-tuning - RMSE: ${rmse_2023_ft:.2f}, R²: {r2_2023_ft:.4f}")
+print(f"Improvement in R²: {r2_2023_ft - r2_2023:.4f}")
+
+print("\nAssignment Part B Complete")
