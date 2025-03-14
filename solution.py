@@ -7,9 +7,14 @@ import time
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn import preprocessing
-from sklearn.model_selection import KFold, train_test_split
-from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix
+from sklearn.model_selection import KFold
 import shap
+
+# Import functions from common_utils.py
+from common_utils import set_seed, split_dataset, preprocess_dataset, EarlyStopper, extract_features
+
+# Set the seed for reproducibility
+set_seed()
 
 # ==============================================================================
 # Part A, Q1 (15 marks)
@@ -38,52 +43,37 @@ class MLP(nn.Module):
         x = self.sigmoid(self.fc4(x))
         return x
 
-# For reproducibility
-def set_seed(seed=42):
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-# Set the seed for reproducibility
-set_seed()
-
 # Load the dataset
 data = pd.read_csv('audio_gtzan1.csv')
 
-# Extract features and labels
-# Assuming the 'filename' column contains genre information (e.g., 'blues.00031.wav')
+# Create binary labels (blues = 0, metal = 1)
 def extract_label(filename):
     if 'blues' in filename:
-        return 0
+        return 'blues'
     elif 'metal' in filename:
-        return 1
+        return 'metal'
     else:
         raise ValueError(f"Unknown genre in filename: {filename}")
 
 # Create labels from filenames
 data['label'] = data['filename'].apply(extract_label)
 
-# Split features and labels
-X = data.drop(['filename', 'label'], axis=1)
-y = data['label']
+# Split the dataset using the function from common_utils
+X_train, y_train, X_test, y_test = split_dataset(
+    data, 
+    columns_to_drop=['filename', 'label'], 
+    test_size=0.3, 
+    random_state=42
+)
 
-# Split into training and testing sets (70:30)
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
-
-# Scale the features
-scaler = preprocessing.StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train)
-X_test_scaled = scaler.transform(X_test)
+# Preprocess the dataset using the function from common_utils
+X_train_scaled, X_test_scaled = preprocess_dataset(X_train, X_test)
 
 # Create a PyTorch dataset class
 class MusicDataset(Dataset):
     def __init__(self, features, labels):
         self.features = torch.tensor(features, dtype=torch.float32)
-        self.labels = torch.tensor(labels.values, dtype=torch.float32).unsqueeze(1)
+        self.labels = torch.tensor(labels, dtype=torch.float32).unsqueeze(1)
         
     def __len__(self):
         return len(self.labels)
@@ -105,24 +95,6 @@ input_size = X_train.shape[1]
 model = MLP(input_size=input_size)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 loss_fn = nn.BCELoss()
-
-# Early stopping implementation
-class EarlyStopper:
-    def __init__(self, patience=3, min_delta=0):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-        self.min_validation_loss = float('inf')
-        
-    def early_stop(self, validation_loss):
-        if validation_loss < self.min_validation_loss:
-            self.min_validation_loss = validation_loss
-            self.counter = 0
-        elif validation_loss > (self.min_validation_loss + self.min_delta):
-            self.counter += 1
-            if self.counter >= self.patience:
-                return True
-        return False
 
 # Train the model
 def train_epoch(model, dataloader, optimizer, loss_fn, device='cpu'):
@@ -253,13 +225,11 @@ def batch_size_cv(X, y, batch_sizes, n_splits=5, n_epochs=100, patience=3, devic
             print(f"  Fold {fold+1}/{n_splits}")
             
             # Split data
-            X_train_fold, X_val_fold = X.iloc[train_idx], X.iloc[val_idx]
-            y_train_fold, y_val_fold = y.iloc[train_idx], y.iloc[val_idx]
+            X_train_fold, X_val_fold = X[train_idx], X[val_idx]
+            y_train_fold, y_val_fold = y[train_idx], y[val_idx]
             
             # Scale features
-            scaler = preprocessing.StandardScaler()
-            X_train_fold_scaled = scaler.fit_transform(X_train_fold)
-            X_val_fold_scaled = scaler.transform(X_val_fold)
+            X_train_fold_scaled, X_val_fold_scaled = preprocess_dataset(X_train_fold, X_val_fold)
             
             # Create datasets and dataloaders
             train_dataset = MusicDataset(X_train_fold_scaled, y_train_fold)
@@ -354,7 +324,30 @@ print(f"balance between computational efficiency and model performance.")
 # Part A, Q3 (10 marks)
 # ==============================================================================
 
-# Function to perform k-fold cross-validation for different hidden layer sizes
+# Define custom MLP with variable first hidden layer size
+class CustomMLP(nn.Module):
+    def __init__(self, input_size, first_hidden_size, other_hidden_size=128, output_size=1, dropout_prob=0.2):
+        super(CustomMLP, self).__init__()
+        self.fc1 = nn.Linear(input_size, first_hidden_size)
+        self.fc2 = nn.Linear(first_hidden_size, other_hidden_size)
+        self.fc3 = nn.Linear(other_hidden_size, other_hidden_size)
+        self.fc4 = nn.Linear(other_hidden_size, output_size)
+        
+        self.dropout = nn.Dropout(dropout_prob)
+        self.relu = nn.ReLU()
+        self.sigmoid = nn.Sigmoid()
+        
+    def forward(self, x):
+        x = self.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.relu(self.fc2(x))
+        x = self.dropout(x)
+        x = self.relu(self.fc3(x))
+        x = self.dropout(x)
+        x = self.sigmoid(self.fc4(x))
+        return x
+
+# Function to perform k-fold cross-validation for different neuron sizes
 def neuron_cv(X, y, neuron_sizes, batch_size, n_splits=5, n_epochs=100, patience=3, device='cpu'):
     # Initialize dictionary to store results
     cv_accuracies = {n: [] for n in neuron_sizes}
@@ -370,13 +363,11 @@ def neuron_cv(X, y, neuron_sizes, batch_size, n_splits=5, n_epochs=100, patience
             print(f"  Fold {fold+1}/{n_splits}")
             
             # Split data
-            X_train_fold, X_val_fold = X.iloc[train_idx], X.iloc[val_idx]
-            y_train_fold, y_val_fold = y.iloc[train_idx], y.iloc[val_idx]
+            X_train_fold, X_val_fold = X[train_idx], X[val_idx]
+            y_train_fold, y_val_fold = y[train_idx], y[val_idx]
             
             # Scale features
-            scaler = preprocessing.StandardScaler()
-            X_train_fold_scaled = scaler.fit_transform(X_train_fold)
-            X_val_fold_scaled = scaler.transform(X_val_fold)
+            X_train_fold_scaled, X_val_fold_scaled = preprocess_dataset(X_train_fold, X_val_fold)
             
             # Create datasets and dataloaders
             train_dataset = MusicDataset(X_train_fold_scaled, y_train_fold)
@@ -384,29 +375,6 @@ def neuron_cv(X, y, neuron_sizes, batch_size, n_splits=5, n_epochs=100, patience
             
             train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
             val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-            
-            # Define custom MLP with variable hidden size for the first layer
-            class CustomMLP(nn.Module):
-                def __init__(self, input_size, first_hidden_size, other_hidden_size=128, output_size=1, dropout_prob=0.2):
-                    super(CustomMLP, self).__init__()
-                    self.fc1 = nn.Linear(input_size, first_hidden_size)
-                    self.fc2 = nn.Linear(first_hidden_size, other_hidden_size)
-                    self.fc3 = nn.Linear(other_hidden_size, other_hidden_size)
-                    self.fc4 = nn.Linear(other_hidden_size, output_size)
-                    
-                    self.dropout = nn.Dropout(dropout_prob)
-                    self.relu = nn.ReLU()
-                    self.sigmoid = nn.Sigmoid()
-                    
-                def forward(self, x):
-                    x = self.relu(self.fc1(x))
-                    x = self.dropout(x)
-                    x = self.relu(self.fc2(x))
-                    x = self.dropout(x)
-                    x = self.relu(self.fc3(x))
-                    x = self.dropout(x)
-                    x = self.sigmoid(self.fc4(x))
-                    return x
             
             # Initialize model, optimizer, and loss function
             input_size = X_train_fold.shape[1]
@@ -476,36 +444,13 @@ print(f"without overfitting. Smaller networks might not capture all the relevant
 print(f"while larger networks could lead to overfitting or longer training times.")
 
 # Train the model with optimal parameters and plot learning curves
-# Define custom MLP with optimal number of neurons
-class OptimalMLP(nn.Module):
-    def __init__(self, input_size, first_hidden_size, other_hidden_size=128, output_size=1, dropout_prob=0.2):
-        super(OptimalMLP, self).__init__()
-        self.fc1 = nn.Linear(input_size, first_hidden_size)
-        self.fc2 = nn.Linear(first_hidden_size, other_hidden_size)
-        self.fc3 = nn.Linear(other_hidden_size, other_hidden_size)
-        self.fc4 = nn.Linear(other_hidden_size, output_size)
-        
-        self.dropout = nn.Dropout(dropout_prob)
-        self.relu = nn.ReLU()
-        self.sigmoid = nn.Sigmoid()
-        
-    def forward(self, x):
-        x = self.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.relu(self.fc2(x))
-        x = self.dropout(x)
-        x = self.relu(self.fc3(x))
-        x = self.dropout(x)
-        x = self.sigmoid(self.fc4(x))
-        return x
-
 # Create dataloaders with optimal batch size
 train_loader = DataLoader(train_dataset, batch_size=optimal_batch_size, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=optimal_batch_size, shuffle=False)
 
 # Initialize model, optimizer, and loss function
 input_size = X_train.shape[1]
-optimal_model = OptimalMLP(input_size=input_size, first_hidden_size=optimal_neurons)
+optimal_model = CustomMLP(input_size=input_size, first_hidden_size=optimal_neurons)
 optimal_model = optimal_model.to(device)
 optimizer = torch.optim.Adam(optimal_model.parameters(), lr=0.001)
 loss_fn = nn.BCELoss()
@@ -558,101 +503,6 @@ torch.save(optimal_model.state_dict(), 'optimal_model.pth')
 # Part A, Q4 (10 marks)
 # ==============================================================================
 
-# Import SHAP library
-import shap
-
-# Function to extract features from an audio file
-def extract_features(audio_file_path):
-    # Note: This is a placeholder function. The actual implementation should match
-    # the one in common_utils.py that was used to extract features for the training dataset.
-    # You would need to use libraries like librosa to extract audio features.
-    
-    # For example:
-    import librosa
-    import pandas as pd
-    import numpy as np
-    
-    # Load the audio file
-    y, sr = librosa.load(audio_file_path, sr=None)
-    
-    # Extract features
-    # Chroma feature
-    chroma_stft = librosa.feature.chroma_stft(y=y, sr=sr)
-    chroma_stft_mean = np.mean(chroma_stft)
-    chroma_stft_var = np.var(chroma_stft)
-    
-    # RMS energy
-    rms = librosa.feature.rms(y=y)
-    rms_mean = np.mean(rms)
-    rms_var = np.var(rms)
-    
-    # Spectral centroid
-    spectral_centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
-    spectral_centroid_mean = np.mean(spectral_centroid)
-    spectral_centroid_var = np.var(spectral_centroid)
-    
-    # Spectral bandwidth
-    spectral_bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr)
-    spectral_bandwidth_mean = np.mean(spectral_bandwidth)
-    spectral_bandwidth_var = np.var(spectral_bandwidth)
-    
-    # Spectral rolloff
-    rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)
-    rolloff_mean = np.mean(rolloff)
-    rolloff_var = np.var(rolloff)
-    
-    # Zero crossing rate
-    zero_crossing_rate = librosa.feature.zero_crossing_rate(y)
-    zero_crossing_rate_mean = np.mean(zero_crossing_rate)
-    zero_crossing_rate_var = np.var(zero_crossing_rate)
-    
-    # Harmony and percussive components
-    y_harmonic, y_percussive = librosa.effects.hpss(y)
-    harmony_mean = np.mean(y_harmonic)
-    harmony_var = np.var(y_harmonic)
-    perceptr_mean = np.mean(y_percussive)
-    perceptr_var = np.var(y_percussive)
-    
-    # Tempo
-    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-    tempo = librosa.beat.tempo(onset_envelope=onset_env, sr=sr)[0]
-    
-    # MFCCs
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20)
-    mfcc_means = np.mean(mfcc, axis=1)
-    mfcc_vars = np.var(mfcc, axis=1)
-    
-    # Combine all features into a dictionary
-    features = {
-        'chroma_stft_mean': chroma_stft_mean,
-        'chroma_stft_var': chroma_stft_var,
-        'rms_mean': rms_mean,
-        'rms_var': rms_var,
-        'spectral_centroid_mean': spectral_centroid_mean,
-        'spectral_centroid_var': spectral_centroid_var,
-        'spectral_bandwidth_mean': spectral_bandwidth_mean,
-        'spectral_bandwidth_var': spectral_bandwidth_var,
-        'rolloff_mean': rolloff_mean,
-        'rolloff_var': rolloff_var,
-        'zero_crossing_rate_mean': zero_crossing_rate_mean,
-        'zero_crossing_rate_var': zero_crossing_rate_var,
-        'harmony_mean': harmony_mean,
-        'harmony_var': harmony_var,
-        'perceptr_mean': perceptr_mean,
-        'perceptr_var': perceptr_var,
-        'tempo': tempo
-    }
-    
-    # Add MFCCs
-    for i in range(1, 21):
-        features[f'mfcc{i}_mean'] = mfcc_means[i-1]
-        features[f'mfcc{i}_var'] = mfcc_vars[i-1]
-    
-    # Convert to DataFrame
-    df = pd.DataFrame([features])
-    
-    return df
-
 # Load the test audio file and extract features
 test_audio_path = './audio_test.wav'  # Update this with the actual path
 df = extract_features(test_audio_path)
@@ -662,12 +512,15 @@ size_row, size_column = df.shape
 print(f"DataFrame shape: {size_row} rows x {size_column} columns")
 
 # Preprocess the test data
-# Scale using the same scaler used for training data
-X_test_scaled = scaler.transform(df)
-X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32)
+# Extract features (excluding the filename column)
+X_test_single = df.drop(['filename'], axis=1)
+
+# Scale using the same scaler
+X_test_single_scaled = preprocessing.StandardScaler().fit(X_train).transform(X_test_single)
+X_test_tensor = torch.tensor(X_test_single_scaled, dtype=torch.float32)
 
 # Load the optimal model
-optimal_model = OptimalMLP(input_size=input_size, first_hidden_size=optimal_neurons)
+optimal_model = CustomMLP(input_size=input_size, first_hidden_size=optimal_neurons)
 optimal_model.load_state_dict(torch.load('optimal_model.pth'))
 optimal_model.eval()
 
@@ -695,8 +548,8 @@ explainer = shap.DeepExplainer(optimal_model, background_tensor)
 # Calculate SHAP values for the test sample
 shap_values = explainer.shap_values(X_test_tensor)
 
-# Get feature names from the original dataframe (excluding 'filename' and 'label')
-feature_names = X.columns.tolist()
+# Get feature names from the original dataframe (excluding 'filename')
+feature_names = X_test_single.columns.tolist()
 
 # Create a DataFrame of SHAP values
 shap_df = pd.DataFrame(shap_values[0], columns=feature_names)
@@ -706,7 +559,7 @@ top_features = shap_df.abs().mean().sort_values(ascending=False).head(10).index.
 
 # Plot SHAP values for the top features
 plt.figure(figsize=(12, 8))
-shap.summary_plot(shap_values, X_test_scaled, feature_names=feature_names, plot_type="bar", 
+shap.summary_plot(shap_values, X_test_single_scaled, feature_names=feature_names, plot_type="bar", 
                   max_display=10, show=False)
 plt.title(f'Top 10 Important Features for Prediction: {predicted_genre}')
 plt.tight_layout()

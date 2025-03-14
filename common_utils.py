@@ -61,7 +61,15 @@ def extract_features(filepath):
     signal processing
     '''
     # Reading audio file
-    y, sr = librosa.load(filepath, mono=True)
+    try:
+        y, sr = librosa.load(filepath, mono=True)
+        
+        # if y.ndim > 1:
+        #     y = np.mean(y, axis=0)
+    except Exception as e:
+        print(f"Error loading audio: {e}")
+        raise
+    
     chroma_stft = librosa.feature.chroma_stft(y=y, sr=sr)
     rms = librosa.feature.rms(y=y)
     spec_cent = librosa.feature.spectral_centroid(y=y, sr=sr)
@@ -107,6 +115,28 @@ def extract_features(filepath):
     feature_set = pd.DataFrame([features], columns=columns)
          
     return feature_set
+
+def generate_folds(n_folds, parameters, training_features, training_labels):
+    X_train_scaled_dict = {param: [] for param in parameters}
+    X_val_scaled_dict = {param: [] for param in parameters}
+    y_train_dict = {param: [] for param in parameters}
+    y_val_dict = {param: [] for param in parameters}
+
+    kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+
+    for param in parameters:
+        for train_idx, val_idx in kf.split(training_features):
+            X_train_fold, X_val_fold = training_features.iloc[train_idx], training_features.iloc[val_idx]
+            y_train_fold, y_val_fold = training_labels[train_idx], training_labels[val_idx]
+            
+            X_train_fold_scaled, X_val_fold_scaled = preprocess_dataset(X_train_fold, X_val_fold)
+            
+            X_train_scaled_dict[param].append(X_train_fold_scaled)
+            X_val_scaled_dict[param].append(X_val_fold_scaled)
+            y_train_dict[param].append(y_train_fold)
+            y_val_dict[param].append(y_val_fold)
+            
+    return X_train_scaled_dict, X_val_scaled_dict, y_train_dict, y_val_dict
 
 
 # early stopping obtained from tutorial
