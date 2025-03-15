@@ -178,3 +178,26 @@ class MLP_Custom(nn.Module):
         x = self.dropout(x)
         x = self.sigmoid(self.fc4(x))
         return x
+
+class MLP_hidden(nn.Module):
+
+    def __init__(self, no_features, no_neuron, no_hidden = 128, no_labels = 1):
+        super().__init__()
+        self.mlp_stack = nn.Sequential(
+            # YOUR CODE HERE
+            nn.Linear(no_features, no_neuron),
+            nn.ReLU(),
+            nn.Dropout(p=0.2),
+            nn.Linear(no_neuron, no_hidden),
+            nn.ReLU(),
+            nn.Dropout(p=0.2),
+            nn.Linear(no_hidden, no_hidden),
+            nn.ReLU(),
+            nn.Dropout(p=0.2),
+            nn.Linear(no_hidden, no_labels),
+            nn.Sigmoid()
+        )
+        
+    def forward(self, x):
+        logits = self.mlp_stack(x)
+        return logits
